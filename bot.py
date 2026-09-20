@@ -536,4 +536,17 @@ def main():
     thread = threading.Thread(target=run_webserver, daemon=True)
     thread.start()
 
-    
+    # Build and run the bot
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("access", cmd_access))
+    app.add_handler(CommandHandler("revoke", cmd_revoke))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    logger.info("Bot started!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
