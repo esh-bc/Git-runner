@@ -94,6 +94,7 @@ async def validate_github(repo: str, token: str) -> bool:
     return r.status_code == 200
 
 async def trigger_workflow(repo: str, token: str, workflow_file: str) -> bool:
+    """Trigger a workflow_dispatch on the given workflow file."""
     url     = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow_file}/dispatches"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -102,6 +103,44 @@ async def trigger_workflow(repo: str, token: str, workflow_file: str) -> bool:
     async with httpx.AsyncClient() as client:
         r = await client.post(url, headers=headers, json={"ref": "main"})
     return r.status_code == 204
+
+async def cancel_workflow(repo: str, token: str, workflow_file: str) -> bool:
+    """Find the latest in_progress or queued run of the workflow and cancel it."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept"       : "application/vnd.github+json"
+    }
+    async with httpx.AsyncClient() as client:
+        # Step 1: Get runs for this workflow that are active
+        list_url = (
+            f"https://api.github.com/repos/{repo}/actions/workflows"
+            f"/{workflow_file}/runs?status=in_progress&per_page=5"
+        )
+        r = await client.get(list_url, headers=headers)
+        if r.status_code != 200:
+            return False
+
+        runs = r.json().get("workflow_runs", [])
+
+        # Also check queued runs
+        list_url_queued = (
+            f"https://api.github.com/repos/{repo}/actions/workflows"
+            f"/{workflow_file}/runs?status=queued&per_page=5"
+        )
+        r2 = await client.get(list_url_queued, headers=headers)
+        if r2.status_code == 200:
+            runs += r2.json().get("workflow_runs", [])
+
+        if not runs:
+            return False
+
+        # Step 2: Cancel the most recent one
+        run_id   = runs[0]["id"]
+        cancel_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/cancel"
+        rc = await client.post(cancel_url, headers=headers)
+
+        # 202 = accepted for cancellation
+        return rc.status_code == 202
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
 
@@ -145,9 +184,8 @@ def repo_detail_text(r: dict) -> str:
     status = "🟢 Running" if r.get("running") else "🔴 Stopped"
     text   = (
         f"📦 *{r['repo']}*\n\n"
-        f"Status : {status}\n"
-        f"Start workflow : `{r['start_wf']}`\n"
-        f"Stop workflow  : `{r['stop_wf']}`\n"
+        f"Status   : {status}\n"
+        f"Workflow : `{r['start_wf']}`\n"
     )
     if r.get("running") and r.get("start_time"):
         text += f"Running for : {elapsed(r['start_time'])}"
@@ -266,8 +304,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         set_conv(user.id, step="awaiting_start_wf", temp=temp)
         await update.message.reply_text(
             "✅ Token valid!\n\n"
-            "What is your *start* workflow filename?\n"
-            "Example: `start.yml`",
+            "What is your workflow filename?\n"
+            "Example: `main.yml`",
             parse_mode="Markdown"
         )
 
@@ -287,22 +325,21 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-    # ── Step: awaiting stop workflow filename ─────────────────────────────────
-    elif step == "awaiting_stop_wf":
+    # ── Step: awaiting workflow filename (used for both start & cancel) ───────
+    elif step == "awaiting_start_wf":
         if not text.endswith(".yml") and not text.endswith(".yaml"):
             await update.message.reply_text(
-                "❌ Must end in `.yml` or `.yaml`\nExample: `stop.yml`",
+                "❌ Must end in `.yml` or `.yaml`\nExample: `main.yml`",
                 parse_mode="Markdown"
             )
             return
-        temp["stop_wf"] = text
+        temp["start_wf"] = text
 
         # Save the new repo entry
         new_entry = {
             "repo"      : temp["repo"],
             "token"     : temp["token"],
             "start_wf"  : temp["start_wf"],
-            "stop_wf"   : temp["stop_wf"],
             "start_time": None,
             "running"   : False
         }
@@ -314,8 +351,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Repo saved!\n\n"
             f"📦 *{temp['repo']}*\n"
-            f"Start: `{temp['start_wf']}`\n"
-            f"Stop : `{temp['stop_wf']}`",
+            f"Workflow: `{temp['start_wf']}`\n\n"
+            f"Stop will automatically cancel the running workflow.",
             parse_mode="Markdown",
             reply_markup=main_menu_keyboard(user.id)
         )
@@ -401,13 +438,13 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 reply_markup=repo_detail_keyboard(index, False)
             )
 
-    # ── Stop Workflow ─────────────────────────────────────────────────────────
+    # ── Stop Workflow (cancel running run) ───────────────────────────────────
     elif data.startswith("stop_"):
         index = int(data.split("_")[1])
         if index >= len(user_repos):
             return
         r  = user_repos[index]
-        ok = await trigger_workflow(r["repo"], r["token"], r["stop_wf"])
+        ok = await cancel_workflow(r["repo"], r["token"], r["start_wf"])
         if ok:
             user_repos[index]["running"]    = False
             user_repos[index]["start_time"] = None
@@ -419,10 +456,10 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await query.edit_message_text(
-                f"❌ Failed to trigger `{r['stop_wf']}`\n"
-                f"Check your token has `workflow` permission and the file exists.",
+                "❌ Could not find a running workflow to cancel.\n"
+                "It may have already finished or was never started.",
                 parse_mode="Markdown",
-                reply_markup=repo_detail_keyboard(index, True)
+                reply_markup=repo_detail_keyboard(index, False)
             )
 
     # ── Refresh ───────────────────────────────────────────────────────────────
@@ -499,17 +536,4 @@ def main():
     thread = threading.Thread(target=run_webserver, daemon=True)
     thread.start()
 
-    # Build and run the bot
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("access", cmd_access))
-    app.add_handler(CommandHandler("revoke", cmd_revoke))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logger.info("Bot started!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+    
