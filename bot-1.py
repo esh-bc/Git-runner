@@ -11,8 +11,8 @@ import httpx
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-OWNER_ID  = 123456789  # Your Telegram user ID
+BOT_TOKEN = "8683204491:AAFk-Erh2DQlXCMuUZpQjtecbx0MuJtiO-I"
+OWNER_ID  = 8189708860  # Your Telegram user ID
 PORT      = 8080       # Webserver port for uptime robot
 
 # ── Logging ───────────────────────────────────────────────────────────────────
